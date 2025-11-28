@@ -65,10 +65,10 @@ SAVE_DIR=downloaded_attachments
 运行下载脚本，程序会自动寻找真实路径并开始下载：
 
 ```bash
-python download_qq_attachments.py
+python DownloadQQAttachments.py
 ```
 
-==注：请将文件名替换为你实际保存的 Python 脚本文件名==
+_注：请将文件名替换为你实际保存的 Python 脚本文件名_
 
 #### 第二步：统计信息
 
