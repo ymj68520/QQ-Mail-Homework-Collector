@@ -84,6 +84,9 @@ class QQMailApp:
         self.btn_analyze = ttk.Button(action_frame, text="📊 生成统计表格", command=self.start_analyze_thread)
         self.btn_analyze.pack(side="left", expand=True, fill="x", padx=10)
 
+        self.btn_open_excel = ttk.Button(action_frame, text="📂 打开统计表", command=self.open_excel_file)
+        self.btn_open_excel.pack(side="left", expand=True, fill="x", padx=10)
+
         # 3. 日志区域 Frame
         log_frame = ttk.LabelFrame(self.root, text="📝 运行日志", padding=10)
         log_frame.pack(fill="both", expand=True, padx=10, pady=5)
@@ -114,6 +117,24 @@ class QQMailApp:
             print("✅ 配置已保存到 .env 文件！")
         except Exception as e:
             print(f"❌ 保存失败: {e}")
+
+    def open_excel_file(self):
+        """尝试打开生成的 Excel 文件"""
+        save_dir = self.config["SAVE_DIR"].get()
+        # 这里的路径逻辑需要与 analyze 中保持一致
+        base_dir = os.path.dirname(save_dir) if os.path.dirname(save_dir) else "."
+        output_file = os.path.join(base_dir, "作业统计表.xlsx")
+
+        if not os.path.exists(output_file):
+            print(f"❌ 找不到文件: {output_file}")
+            print("请先点击“生成统计表格”生成文件。")
+            return
+
+        print(f"📂 正在打开: {output_file}")
+        try:
+            os.startfile(output_file)
+        except Exception as e:
+            print(f"❌ 无法打开文件: {e}")
 
     # ================= 业务逻辑：下载 =================
     def start_download_thread(self):
@@ -231,7 +252,9 @@ class QQMailApp:
             self._reset_buttons()
             return
 
-        data_list = []
+        student_map = {}
+        no_id_list = []
+
         for folder in os.listdir(save_dir):
             folder_path = os.path.join(save_dir, folder)
             if os.path.isdir(folder_path):
@@ -254,23 +277,73 @@ class QQMailApp:
                 info["other"] = re.sub(r'\s+', ' ', clean_text).strip()
                 
                 files = os.listdir(folder_path)
-                data_list.append({
-                    "文件夹原名": folder,
-                    "学号": info["id"],
-                    "姓名": info["name"],
-                    "作业备注": info["other"],
-                    "附件数": len(files),
-                    "附件列表": "; ".join(files)
-                })
+                
+                # 计算大小
+                total_size = 0
+                for f in files:
+                    fp = os.path.join(folder_path, f)
+                    if os.path.isfile(fp):
+                        total_size += os.path.getsize(fp)
+                
+                sid = info["id"]
+                if sid:
+                    if sid not in student_map:
+                        student_map[sid] = {
+                            "学号": sid,
+                            "姓名": info["name"],
+                            "作业备注": set(),
+                            "来源文件夹": [],
+                            "附件数量": 0,
+                            "附件总大小Bytes": 0,
+                            "附件列表": []
+                        }
+                    entry = student_map[sid]
+                    if len(info["name"]) > len(entry["姓名"]):
+                        entry["姓名"] = info["name"]
+                    if info["other"]:
+                        entry["作业备注"].add(info["other"])
+                    entry["来源文件夹"].append(folder)
+                    entry["附件数量"] += len(files)
+                    entry["附件总大小Bytes"] += total_size
+                    entry["附件列表"].extend(files)
+                else:
+                    no_id_list.append({
+                        "学号": "",
+                        "姓名": info["name"],
+                        "作业备注": info["other"],
+                        "来源文件夹": folder,
+                        "附件数量": len(files),
+                        "附件总大小": self._format_size(total_size),
+                        "附件列表": "; ".join(files)
+                    })
 
-        if not data_list:
+        final_data = []
+        for sid, data in student_map.items():
+            final_data.append({
+                "学号": sid,
+                "姓名": data["姓名"],
+                "作业备注": "; ".join(sorted(list(data["作业备注"]))),
+                "来源文件夹": "; ".join(data["来源文件夹"]),
+                "附件数量": data["附件数量"],
+                "附件总大小": self._format_size(data["附件总大小Bytes"]),
+                "附件列表": "; ".join(data["附件列表"])
+            })
+        final_data.extend(no_id_list)
+
+        if not final_data:
             print("⚠️ 未找到任何文件夹记录。")
         else:
             try:
-                df = pd.DataFrame(data_list)
+                df = pd.DataFrame(final_data)
                 df = df.sort_values(by="学号")
-                df.to_excel(output_file, index=False)
-                print(f"✅ 统计完成！共 {len(df)} 条数据。")
+                
+                # 使用 ExcelWriter 启用筛选功能
+                with pd.ExcelWriter(output_file, engine='openpyxl') as writer:
+                    df.to_excel(writer, index=False, sheet_name='Sheet1')
+                    worksheet = writer.sheets['Sheet1']
+                    worksheet.auto_filter.ref = worksheet.dimensions
+                
+                print(f"✅ 统计完成！共 {len(df)} 条数据(学生)。")
                 print(f"📄 Excel 已保存至: {os.path.abspath(output_file)}")
             except Exception as e:
                 print(f"❌ 保存 Excel 失败: {e}")
@@ -281,6 +354,15 @@ class QQMailApp:
     def _reset_buttons(self):
         self.root.after(0, lambda: self.btn_download.config(state="normal"))
         self.root.after(0, lambda: self.btn_analyze.config(state="normal"))
+
+    def _format_size(self, s):
+        if s == 0: return "0B"
+        units = ("B", "KB", "MB", "GB")
+        i = 0
+        while s >= 1024 and i < len(units) - 1:
+            s /= 1024.0
+            i += 1
+        return f"{s:.2f} {units[i]}"
 
     # ================= 辅助函数 =================
     def _clean_filename(self, filename):

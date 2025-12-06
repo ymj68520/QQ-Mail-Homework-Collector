@@ -63,6 +63,18 @@ def parse_folder_name(folder_name):
     info["assignment"] = remaining
     return info
 
+def format_size(size_bytes):
+    """将字节转换为易读的格式 (KB, MB, GB)"""
+    if size_bytes == 0:
+        return "0B"
+    size_name = ("B", "KB", "MB", "GB")
+    i = 0
+    p = size_bytes
+    while p >= 1024 and i < len(size_name) - 1:
+        p /= 1024.0
+        i += 1
+    return f"{p:.2f} {size_name[i]}"
+
 def generate_report():
     if not os.path.exists(SAVE_DIR):
         print(f"❌ 找不到目录: {SAVE_DIR}，请先运行下载程序。")
@@ -70,7 +82,10 @@ def generate_report():
 
     print(f"正在扫描目录: {SAVE_DIR} ...")
     
-    data_list = []
+    # 使用字典按学号聚合数据
+    student_map = {}
+    # 存储无法识别学号的记录
+    no_id_list = []
     
     # 遍历根目录下的所有文件夹
     for folder in os.listdir(SAVE_DIR):
@@ -84,39 +99,111 @@ def generate_report():
             # 2. 统计里面的文件
             files = os.listdir(folder_path)
             file_count = len(files)
-            file_names = "; ".join(files) # 把所有文件名拼在一起
             
-            # 3. 汇总数据
-            entry = {
-                "文件夹原名": parsed_info["original_text"],
-                "学号": parsed_info["student_id"],
-                "姓名": parsed_info["name"],
-                "作业备注/其他信息": parsed_info["assignment"],
-                "附件数量": file_count,
-                "附件列表": file_names,
-                "状态": "正常" if file_count > 0 else "无附件"
-            }
-            data_list.append(entry)
+            # 计算文件夹内文件总大小
+            folder_size = 0
+            for f in files:
+                fp = os.path.join(folder_path, f)
+                if os.path.isfile(fp):
+                    folder_size += os.path.getsize(fp)
+            
+            sid = parsed_info["student_id"]
+            
+            if sid:
+                # 如果有学号，进行聚合
+                if sid not in student_map:
+                    student_map[sid] = {
+                        "学号": sid,
+                        "姓名": parsed_info["name"],
+                        "作业备注": set(),  # 使用集合去重
+                        "来源文件夹": [],
+                        "附件数量": 0,
+                        "附件总大小Bytes": 0,
+                        "附件列表": []
+                    }
+                
+                # 更新信息
+                entry = student_map[sid]
+                # 如果当前解析的名字比已有的长（更完整），则更新名字
+                if len(parsed_info["name"]) > len(entry["姓名"]):
+                    entry["姓名"] = parsed_info["name"]
+                
+                if parsed_info["assignment"]:
+                    entry["作业备注"].add(parsed_info["assignment"])
+                
+                entry["来源文件夹"].append(parsed_info["original_text"])
+                entry["附件数量"] += file_count
+                entry["附件总大小Bytes"] += folder_size
+                entry["附件列表"].extend(files)
+                
+            else:
+                # 没有学号，作为单独条目
+                no_id_list.append({
+                    "学号": "",
+                    "姓名": parsed_info["name"],
+                    "作业备注": parsed_info["assignment"],
+                    "来源文件夹": parsed_info["original_text"],
+                    "附件数量": file_count,
+                    "附件总大小": format_size(folder_size),
+                    "附件列表": "; ".join(files),
+                    "状态": "无法识别学号" if file_count > 0 else "无附件(无学号)"
+                })
 
-    if not data_list:
+    # 将聚合后的 student_map 转换为列表
+    final_data = []
+    
+    # 处理聚合数据
+    for sid, data in student_map.items():
+        # 格式化
+        note_str = "; ".join(sorted(list(data["作业备注"])))
+        folder_str = "; ".join(data["来源文件夹"])
+        file_str = "; ".join(data["附件列表"])
+        size_str = format_size(data["附件总大小Bytes"])
+        status = "正常" if data["附件数量"] > 0 else "无附件"
+        
+        final_data.append({
+            "学号": sid,
+            "姓名": data["姓名"],
+            "作业备注": note_str,
+            "来源文件夹": folder_str,
+            "附件数量": data["附件数量"],
+            "附件总大小": size_str,
+            "附件列表": file_str,
+            "状态": status
+        })
+    
+    # 合并无学号数据
+    final_data.extend(no_id_list)
+
+    if not final_data:
         print("没有找到任何记录。")
         return
 
     # 使用 Pandas 生成表格
-    df = pd.DataFrame(data_list)
+    df = pd.DataFrame(final_data)
     
-    # 简单的排序：按学号排序（如果学号为空，放到最后）
+    # 简单的排序：按学号排序
     df = df.sort_values(by="学号", ascending=True)
 
-    print(f"扫描完成，共 {len(df)} 条记录。正在写入 Excel...")
+    print(f"扫描完成，共 {len(df)} 条学生/记录。正在写入 Excel...")
     
     try:
-        df.to_excel(OUTPUT_FILE, index=False)
+        # 使用 ExcelWriter 启用筛选功能
+        with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Sheet1')
+            worksheet = writer.sheets['Sheet1']
+            # 开启自动筛选
+            worksheet.auto_filter.ref = worksheet.dimensions
+
         print(f"✅ 统计完成！文件已保存为: {OUTPUT_FILE}")
         
         # 打印预览
         print("\n--- 预览前 5 行 ---")
-        print(df[["学号", "姓名", "附件数量", "状态"]].head().to_string(index=False))
+        # 确保预览列存在
+        preview_cols = ["学号", "姓名", "作业备注", "附件数量", "附件总大小", "状态"]
+        # 防止某些列不存在（比如全是无学号情况可能导致结构差异，虽然上面逻辑保证了键一致，但为了安全）
+        actual_cols = [c for c in preview_cols if c in df.columns]
+        print(df[actual_cols].head().to_string(index=False))
         
     except Exception as e:
         print(f"❌ 保存 Excel 失败: {e}")
